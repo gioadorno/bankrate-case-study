@@ -20,6 +20,12 @@ func (failingClassifier) Classify(context.Context, Intake) (Classification, erro
 	return Classification{}, errors.New("down")
 }
 
+type fixedDrafter struct{ draft string }
+
+func (f fixedDrafter) Draft(context.Context, Intake, []string) (string, error) {
+	return f.draft, nil
+}
+
 func newTestService(classifier Classifier) (*Service, *MemoryRouter, *MemoryAuditStore) {
 	router := &MemoryRouter{}
 	audits := &MemoryAuditStore{}
@@ -79,6 +85,200 @@ func TestProductFeedbackRoutesWithSanitizedContext(t *testing.T) {
 	}
 	if strings.Contains(string(auditBytes), secret) {
 		t.Fatal("sensitive data leaked into audit record")
+	}
+}
+
+func TestProductFeedbackRouteRedactsSensitiveValuesButKeepsOrdinaryAccountAndRoutingWords(t *testing.T) {
+	testCases := []struct {
+		name      string
+		text      string
+		sentinel  string
+		wantInSum string
+	}{
+		{name: "formatted ssn", text: "Feature feedback: my SSN is 123-45-6789.", sentinel: "123-45-6789"},
+		{name: "email", text: "Feature feedback: contact jane@example.com.", sentinel: "jane@example.com"},
+		{name: "spaced card number", text: "Feature feedback: card 4111 1111 1111 1111 was declined.", sentinel: "4111 1111 1111 1111"},
+		{name: "account-like token", text: "Feature feedback: acct_1A2B3C4D5E6F should be easier to find.", sentinel: "acct_1A2B3C4D5E6F"},
+		{name: "explicit account number value", text: "Feature feedback: account number: member-token-48291.", sentinel: "member-token-48291"},
+		{name: "explicit routing number value", text: "Feature feedback: routing number: route-token-48291.", sentinel: "route-token-48291"},
+		{name: "ordinary account and routing words", text: "Feature feedback: account routing should be easier.", wantInSum: "account routing"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			service, router, audits := newTestService(RuleClassifier{})
+			decision, err := service.Triage(context.Background(), Intake{
+				ID: "case-pii-" + strings.ReplaceAll(tc.name, " ", "-"), MemberID: "member-pii", Text: tc.text,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Action != ActionRoute || decision.RoutingContext == nil || len(router.Routes) != 1 {
+				t.Fatalf("expected one routed decision, got action=%s context=%v routes=%d", decision.Action, decision.RoutingContext, len(router.Routes))
+			}
+
+			decisionBytes, err := json.Marshal(decision)
+			if err != nil {
+				t.Fatalf("marshal decision: %v", err)
+			}
+			routeBytes, err := json.Marshal(router.Routes[0].Context)
+			if err != nil {
+				t.Fatalf("marshal route: %v", err)
+			}
+			auditBytes, err := json.Marshal(audits.Records)
+			if err != nil {
+				t.Fatalf("marshal audits: %v", err)
+			}
+
+			if tc.sentinel != "" {
+				for _, observable := range [][]byte{decisionBytes, routeBytes, auditBytes} {
+					if strings.Contains(string(observable), tc.sentinel) {
+						t.Fatalf("sensitive value %q leaked into observable output: %s", tc.sentinel, observable)
+					}
+				}
+			}
+			if tc.wantInSum != "" && !strings.Contains(router.Routes[0].Context.Summary, tc.wantInSum) {
+				t.Fatalf("ordinary words must remain in summary, got %q", router.Routes[0].Context.Summary)
+			}
+		})
+	}
+}
+
+func TestSafetyDetectorDoesNotFlagAccountOrRoutingWordsWithoutValues(t *testing.T) {
+	assessment, err := (RuleSafetyDetector{}).Assess(context.Background(), Intake{
+		Text: "The account routing experience should be easier to understand.",
+	})
+	if err != nil {
+		t.Fatalf("unexpected safety assessment error: %v", err)
+	}
+	if assessment.SensitiveDataFound {
+		t.Fatalf("ordinary account and routing words must not be flagged as sensitive: %+v", assessment)
+	}
+}
+
+func TestProductFeedbackRouteOmitsInvalidOrSensitiveMetadataValues(t *testing.T) {
+	testCases := []struct {
+		name     string
+		key      string
+		value    string
+		sentinel string
+	}{
+		{name: "channel", key: "channel", value: "web jane@example.com", sentinel: "jane@example.com"},
+		{name: "locale", key: "locale", value: "en-US 123-45-6789", sentinel: "123-45-6789"},
+		{name: "app version", key: "app_version", value: "1.2.3 acct_1A2B3C4D5E6F", sentinel: "acct_1A2B3C4D5E6F"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			service, router, audits := newTestService(RuleClassifier{})
+			decision, err := service.Triage(context.Background(), Intake{
+				ID:       "case-metadata-" + strings.ReplaceAll(tc.name, " ", "-"),
+				MemberID: "member-metadata",
+				Text:     "Feature feedback: improve filters.",
+				Metadata: map[string]string{tc.key: tc.value},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.RoutingContext == nil || len(router.Routes) != 1 {
+				t.Fatalf("expected one routed decision, got context=%v routes=%d", decision.RoutingContext, len(router.Routes))
+			}
+			if _, ok := router.Routes[0].Context.Metadata[tc.key]; ok {
+				t.Fatalf("invalid metadata %s must be omitted, got %q", tc.key, router.Routes[0].Context.Metadata[tc.key])
+			}
+
+			decisionBytes, err := json.Marshal(decision)
+			if err != nil {
+				t.Fatalf("marshal decision: %v", err)
+			}
+			routeBytes, err := json.Marshal(router.Routes[0].Context)
+			if err != nil {
+				t.Fatalf("marshal route: %v", err)
+			}
+			auditBytes, err := json.Marshal(audits.Records)
+			if err != nil {
+				t.Fatalf("marshal audits: %v", err)
+			}
+			for _, observable := range [][]byte{decisionBytes, routeBytes, auditBytes} {
+				if strings.Contains(string(observable), tc.sentinel) {
+					t.Fatalf("sensitive value %q leaked into observable output: %s", tc.sentinel, observable)
+				}
+			}
+		})
+	}
+}
+
+func TestProductFeedbackRoutePreservesValidAllowlistedMetadataValues(t *testing.T) {
+	service, router, _ := newTestService(RuleClassifier{})
+	metadata := map[string]string{
+		"channel":     "web",
+		"locale":      "en-US",
+		"app_version": "1.2.3+build.5",
+	}
+
+	decision, err := service.Triage(context.Background(), Intake{
+		ID: "case-valid-metadata", MemberID: "member-valid-metadata",
+		Text: "Feature feedback: improve filters.", Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.RoutingContext == nil || len(router.Routes) != 1 {
+		t.Fatalf("expected one routed decision, got context=%v routes=%d", decision.RoutingContext, len(router.Routes))
+	}
+	for key, want := range metadata {
+		if got := router.Routes[0].Context.Metadata[key]; got != want {
+			t.Fatalf("expected valid %s metadata %q, got %q", key, want, got)
+		}
+	}
+}
+
+func TestGeneratedUnsafeDraftDegradesWithoutPersistingDraftText(t *testing.T) {
+	testCases := []struct {
+		name     string
+		draft    string
+		sentinel string
+	}{
+		{name: "sensitive data", draft: "Your SSN is 123-45-6789.", sentinel: "123-45-6789"},
+		{name: "compliance content", draft: "We may have violated consumer protection law.", sentinel: "violated consumer protection law"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &MemoryRouter{}
+			audits := &MemoryAuditStore{}
+			service := NewService(
+				RuleSafetyDetector{}, RuleClassifier{}, NewStaticPolicyRegistry(),
+				FakeKnowledgeBase{}, fixedDrafter{draft: tc.draft}, router, audits, BasicSanitizer{},
+			)
+
+			decision, err := service.Triage(context.Background(), Intake{
+				ID: "case-unsafe-draft-" + strings.ReplaceAll(tc.name, " ", "-"), MemberID: "member-unsafe-draft", Text: "How do I update my profile?",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Action != ActionEscalate || decision.DraftResponse != nil {
+				t.Fatalf("unsafe generated draft must degrade without a draft, got action=%s draft=%v", decision.Action, decision.DraftResponse)
+			}
+			if len(router.Routes) != 0 {
+				t.Fatal("unsafe generated draft must not route")
+			}
+
+			decisionBytes, err := json.Marshal(decision)
+			if err != nil {
+				t.Fatalf("marshal decision: %v", err)
+			}
+			auditBytes, err := json.Marshal(audits.Records)
+			if err != nil {
+				t.Fatalf("marshal audits: %v", err)
+			}
+			for _, observable := range [][]byte{decisionBytes, auditBytes} {
+				if strings.Contains(string(observable), tc.sentinel) {
+					t.Fatalf("unsafe generated value %q leaked into observable output: %s", tc.sentinel, observable)
+				}
+			}
+		})
 	}
 }
 

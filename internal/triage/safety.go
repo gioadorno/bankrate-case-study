@@ -2,7 +2,6 @@ package triage
 
 import (
 	"context"
-	"regexp"
 	"strings"
 )
 
@@ -23,12 +22,10 @@ func (RuleSafetyDetector) Assess(_ context.Context, intake Intake) (SafetyAssess
 		}
 	}
 
-	if sensitivePattern.MatchString(intake.Text) || strings.Contains(lower, "account number") || strings.Contains(lower, "routing number") {
+	if containsSensitiveData(intake.Text) {
 		assessment.SensitiveDataFound = true
 		assessment.ReasonCodes = append(assessment.ReasonCodes, "sensitive_data_detected")
 	}
 
 	return assessment, nil
 }
-
-var sensitivePattern = regexp.MustCompile(`\b\d{6,}\b`)

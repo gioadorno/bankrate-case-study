@@ -107,6 +107,13 @@ func (s *Service) Triage(ctx context.Context, intake Intake) (Decision, error) {
 		if err != nil {
 			return s.safeDegradedWithClassification(ctx, decision, safety, "drafter_unavailable")
 		}
+		draftSafety, err := s.safety.Assess(ctx, Intake{Text: draft})
+		if err != nil {
+			return s.safeDegradedWithClassification(ctx, decision, safety, "draft_safety_unavailable")
+		}
+		if draftSafety.ComplianceSensitive || draftSafety.SensitiveDataFound {
+			return s.safeDegradedWithClassification(ctx, decision, safety, "unsafe_generated_draft")
+		}
 		decision.Action = ActionDraft
 		decision.DraftResponse = &draft
 		decision.HumanApprovalRequired = true
