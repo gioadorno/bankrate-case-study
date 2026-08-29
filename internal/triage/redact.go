@@ -9,7 +9,7 @@ var sensitiveDataPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`),
 	regexp.MustCompile(`\b(?:\d[ -]?){12,18}\d\b`),
 	regexp.MustCompile(`(?i)\b(?:acct|account)[_-][A-Za-z0-9]{6,}\b`),
-	regexp.MustCompile(`(?i)\b(?:account|routing)\s+number\s*(?::|=|#|\bis\b)\s*[A-Za-z0-9][A-Za-z0-9_-]{3,}\b`),
+	regexp.MustCompile(`(?i)\b(?:account|routing)\s+number\s*(?::|=|#|\bis\b)\s*(?:[A-Za-z]*\d[A-Za-z0-9]*(?:[ -][A-Za-z]*\d[A-Za-z0-9]*){1,3}|[A-Za-z0-9][A-Za-z0-9_-]{3,})\b`),
 	regexp.MustCompile(`\b\d{6,}\b`),
 }
 

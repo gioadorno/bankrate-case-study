@@ -144,6 +144,45 @@ func TestProductFeedbackRouteRedactsSensitiveValuesButKeepsOrdinaryAccountAndRou
 	}
 }
 
+func TestProductFeedbackRouteRedactsCompleteExplicitSpacedAccountAndRoutingValues(t *testing.T) {
+	testCases := []struct {
+		name   string
+		text   string
+		leaked []string
+	}{
+		{
+			name:   "account number",
+			text:   "Feature feedback: account number: AB12 3456 CD78 should be easier to find.",
+			leaked: []string{"AB12 3456 CD78", "3456 CD78"},
+		},
+		{
+			name:   "routing number",
+			text:   "Feature feedback: routing number: 021 000 021 should be easier to find.",
+			leaked: []string{"021 000 021"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			service, router, _ := newTestService(RuleClassifier{})
+			decision, err := service.Triage(context.Background(), Intake{
+				ID: "case-spaced-" + strings.ReplaceAll(tc.name, " ", "-"), MemberID: "member-spaced", Text: tc.text,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Action != ActionRoute || len(router.Routes) != 1 {
+				t.Fatalf("expected one routed decision, got action=%s routes=%d", decision.Action, len(router.Routes))
+			}
+			for _, value := range tc.leaked {
+				if strings.Contains(router.Routes[0].Context.Summary, value) {
+					t.Fatalf("explicit spaced value fragment %q leaked into routing summary %q", value, router.Routes[0].Context.Summary)
+				}
+			}
+		})
+	}
+}
+
 func TestSafetyDetectorDoesNotFlagAccountOrRoutingWordsWithoutValues(t *testing.T) {
 	assessment, err := (RuleSafetyDetector{}).Assess(context.Background(), Intake{
 		Text: "The account routing experience should be easier to understand.",
@@ -240,6 +279,7 @@ func TestGeneratedUnsafeDraftDegradesWithoutPersistingDraftText(t *testing.T) {
 		sentinel string
 	}{
 		{name: "sensitive data", draft: "Your SSN is 123-45-6789.", sentinel: "123-45-6789"},
+		{name: "spaced routing number", draft: "Use routing number: 021 000 021.", sentinel: "021 000 021"},
 		{name: "compliance content", draft: "We may have violated consumer protection law.", sentinel: "violated consumer protection law"},
 	}
 

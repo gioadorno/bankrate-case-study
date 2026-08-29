@@ -118,6 +118,26 @@ func TestReleaseGateRejectsUnsafeEditedResponse(t *testing.T) {
 	}
 }
 
+func TestReleaseGateRejectsEditedResponseWithSpacedRoutingNumber(t *testing.T) {
+	service, _, _ := newTestService(RuleClassifier{})
+	decision, err := service.Triage(context.Background(), Intake{
+		ID: "case-release-spaced-routing", MemberID: "member-spaced-routing", Text: "How do I update my profile?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected triage error: %v", err)
+	}
+
+	unsafeEdit := "Use routing number: 021 000 021."
+	_, err = service.ReleaseForMember(context.Background(), decision.DecisionID, Approval{
+		Status:         ApprovalEditedAndApproved,
+		ReviewerID:     "care-agent-spaced-routing",
+		EditedResponse: &unsafeEdit,
+	})
+	if !errors.Is(err, ErrEditedResponseUnsafe) {
+		t.Fatalf("edited response with spaced routing number must be rejected, got %v", err)
+	}
+}
+
 func TestReleaseGateBlocksAuthoritativeComplianceAuditState(t *testing.T) {
 	service, _, audits := newTestService(RuleClassifier{})
 	decision, err := service.Triage(context.Background(), Intake{
