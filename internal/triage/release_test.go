@@ -66,8 +66,10 @@ func TestReleaseGateRejectsReplayedApproval(t *testing.T) {
 	if _, err := service.ReleaseForMember(context.Background(), decision.DecisionID, approval); err != nil {
 		t.Fatalf("first approval should release: %v", err)
 	}
-	if _, err := service.ReleaseForMember(context.Background(), decision.DecisionID, approval); err == nil {
-		t.Fatal("replayed approval must be rejected")
+	// The first approval atomically leaves the pending state, so a replay is
+	// refused by the authoritative eligibility preflight, not by a generic error.
+	if _, err := service.ReleaseForMember(context.Background(), decision.DecisionID, approval); !errors.Is(err, ErrReleaseNotAllowed) {
+		t.Fatalf("replayed approval must be rejected as ineligible, got %v", err)
 	}
 }
 
@@ -113,8 +115,8 @@ func TestReleaseGateRejectsUnsafeEditedResponse(t *testing.T) {
 		ReviewerID:     "care-agent-unsafe-edit",
 		EditedResponse: &unsafeEdit,
 	})
-	if err == nil {
-		t.Fatal("unsafe edited response must be rejected")
+	if !errors.Is(err, ErrEditedResponseUnsafe) {
+		t.Fatalf("unsafe edited response must be rejected, got %v", err)
 	}
 }
 
