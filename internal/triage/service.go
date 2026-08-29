@@ -2,6 +2,8 @@ package triage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -228,7 +230,7 @@ func (s *Service) auditRecord(decision Decision, safety SafetyAssessment) AuditR
 	if decision.DraftResponse != nil {
 		status = ApprovalPending
 	}
-	return AuditRecord{
+	record := AuditRecord{
 		DecisionID:     decision.DecisionID,
 		IntakeID:       decision.IntakeID,
 		Category:       decision.Category,
@@ -241,4 +243,9 @@ func (s *Service) auditRecord(decision Decision, safety SafetyAssessment) AuditR
 		AuditStatus:    AuditDegraded,
 		CreatedAt:      s.now(),
 	}
+	if decision.DraftResponse != nil {
+		hash := sha256.Sum256([]byte(*decision.DraftResponse))
+		record.DraftSHA256 = hex.EncodeToString(hash[:])
+	}
+	return record
 }

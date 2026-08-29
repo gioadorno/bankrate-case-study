@@ -92,7 +92,21 @@ func (s *MemoryAuditStore) Save(_ context.Context, record AuditRecord) error {
 	return nil
 }
 
-func (s *MemoryAuditStore) UpdateApproval(_ context.Context, decisionID string, status ApprovalStatus, approvedBy string, completedAt time.Time) error {
+func (s *MemoryAuditStore) Get(_ context.Context, decisionID string) (AuditRecord, error) {
+	if s.Err != nil {
+		return AuditRecord{}, s.Err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, record := range s.Records {
+		if record.DecisionID == decisionID {
+			return record, nil
+		}
+	}
+	return AuditRecord{}, errors.New("audit record not found")
+}
+
+func (s *MemoryAuditStore) CompareAndSetApproval(_ context.Context, decisionID, expectedDraftSHA256 string, status ApprovalStatus, approvedBy string, completedAt time.Time) error {
 	if s.Err != nil {
 		return s.Err
 	}
@@ -100,10 +114,19 @@ func (s *MemoryAuditStore) UpdateApproval(_ context.Context, decisionID string, 
 	defer s.mu.Unlock()
 	for i := range s.Records {
 		if s.Records[i].DecisionID == decisionID {
-			s.Records[i].ApprovalStatus = status
-			s.Records[i].ApprovedBy = approvedBy
-			s.Records[i].AuditStatus = AuditCompleted
-			s.Records[i].CompletedAt = &completedAt
+			record := &s.Records[i]
+			if (status != ApprovalApproved && status != ApprovalEditedAndApproved) ||
+				record.Category != CategoryGeneralQA ||
+				record.Action != ActionDraft ||
+				record.AuditStatus != AuditPendingApproval ||
+				record.ApprovalStatus != ApprovalPending ||
+				record.DraftSHA256 != expectedDraftSHA256 {
+				return ErrApprovalStateConflict
+			}
+			record.ApprovalStatus = status
+			record.ApprovedBy = approvedBy
+			record.AuditStatus = AuditCompleted
+			record.CompletedAt = &completedAt
 			return nil
 		}
 	}
