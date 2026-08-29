@@ -96,11 +96,10 @@ type Decision struct {
 }
 
 type Approval struct {
-	DecisionID     string         `json:"decision_id"`
-	Status         ApprovalStatus `json:"status"`
-	ReviewerID     string         `json:"reviewer_id"`
-	ReviewedAt     time.Time      `json:"reviewed_at"`
-	EditedResponse *string        `json:"edited_response,omitempty"`
+	Status           ApprovalStatus `json:"status"`
+	ReviewerID       string         `json:"reviewer_id"` // Authenticated by the upstream care workflow in this prototype.
+	ReviewedResponse string         `json:"reviewed_response,omitempty"`
+	EditedResponse   *string        `json:"edited_response,omitempty"`
 }
 
 type MemberRelease struct {
@@ -119,6 +118,7 @@ type AuditRecord struct {
 	PolicyVersion  string
 	ReasonCodes    []string
 	SafetyFlags    []string
+	DraftSHA256    string
 	ApprovalStatus ApprovalStatus
 	AuditStatus    AuditStatus
 	ApprovedBy     string

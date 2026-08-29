@@ -14,14 +14,14 @@ func (RuleClassifier) Classify(_ context.Context, intake Intake) (Classification
 	lower := strings.ToLower(intake.Text)
 
 	if strings.Contains(lower, "feedback") || strings.Contains(lower, "feature") || strings.Contains(lower, "wish") || strings.Contains(lower, "improve") {
-		return Classification{Category: CategoryProductFeedback, Confidence: 0.90, ReasonCode: "product_feedback_language"}, nil
+		return Classification{Category: CategoryProductFeedback, Confidence: 0.90, ReasonCode: classifierReasonProductFeedbackLanguage}, nil
 	}
 
 	if strings.Contains(lower, "law") || strings.Contains(lower, "illegal") || strings.Contains(lower, "regulator") || strings.Contains(lower, "violation") {
-		return Classification{Category: CategoryCompliance, Confidence: 0.82, ReasonCode: "compliance_language"}, nil
+		return Classification{Category: CategoryCompliance, Confidence: 0.82, ReasonCode: classifierReasonComplianceLanguage}, nil
 	}
 
-	return Classification{Category: CategoryGeneralQA, Confidence: 0.92, ReasonCode: "faq_match"}, nil
+	return Classification{Category: CategoryGeneralQA, Confidence: 0.92, ReasonCode: classifierReasonFAQMatch}, nil
 }
 
 type FakeKnowledgeBase struct {
@@ -92,7 +92,21 @@ func (s *MemoryAuditStore) Save(_ context.Context, record AuditRecord) error {
 	return nil
 }
 
-func (s *MemoryAuditStore) UpdateApproval(_ context.Context, decisionID string, status ApprovalStatus, approvedBy string, completedAt time.Time) error {
+func (s *MemoryAuditStore) Get(_ context.Context, decisionID string) (AuditRecord, error) {
+	if s.Err != nil {
+		return AuditRecord{}, s.Err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, record := range s.Records {
+		if record.DecisionID == decisionID {
+			return record, nil
+		}
+	}
+	return AuditRecord{}, errors.New("audit record not found")
+}
+
+func (s *MemoryAuditStore) CompareAndSetApproval(_ context.Context, decisionID, expectedDraftSHA256 string, status ApprovalStatus, approvedBy string, completedAt time.Time) error {
 	if s.Err != nil {
 		return s.Err
 	}
@@ -100,10 +114,19 @@ func (s *MemoryAuditStore) UpdateApproval(_ context.Context, decisionID string, 
 	defer s.mu.Unlock()
 	for i := range s.Records {
 		if s.Records[i].DecisionID == decisionID {
-			s.Records[i].ApprovalStatus = status
-			s.Records[i].ApprovedBy = approvedBy
-			s.Records[i].AuditStatus = AuditCompleted
-			s.Records[i].CompletedAt = &completedAt
+			record := &s.Records[i]
+			if (status != ApprovalApproved && status != ApprovalEditedAndApproved) ||
+				record.Category != CategoryGeneralQA ||
+				record.Action != ActionDraft ||
+				record.AuditStatus != AuditPendingApproval ||
+				record.ApprovalStatus != ApprovalPending ||
+				record.DraftSHA256 != expectedDraftSHA256 {
+				return ErrApprovalStateConflict
+			}
+			record.ApprovalStatus = status
+			record.ApprovedBy = approvedBy
+			record.AuditStatus = AuditCompleted
+			record.CompletedAt = &completedAt
 			return nil
 		}
 	}

@@ -27,7 +27,8 @@ type Router interface {
 
 type AuditStore interface {
 	Save(ctx context.Context, record AuditRecord) error
-	UpdateApproval(ctx context.Context, decisionID string, status ApprovalStatus, approvedBy string, completedAt time.Time) error
+	Get(ctx context.Context, decisionID string) (AuditRecord, error)
+	CompareAndSetApproval(ctx context.Context, decisionID, expectedDraftSHA256 string, status ApprovalStatus, approvedBy string, completedAt time.Time) error
 }
 
 type PolicyRegistry interface {
