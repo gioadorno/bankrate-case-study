@@ -35,6 +35,8 @@ The core safety principle is **fail closed toward humans**. Compliance-sensitive
 8. The prototype uses deterministic/fake dependencies to demonstrate system boundaries rather than model sophistication.
 9. Audit/routing records exclude raw intake text and sensitive member/account data.
 10. Audit metadata retention is assumed to be 365 days for this exercise and should be replaced by the real Legal/Compliance retention policy.
+11. Reviewer identity supplied to the release gate is already authenticated by the upstream care workflow; this service implements no authentication or authorization of its own.
+12. Classifier output is untrusted input. Confidence and reason codes are normalized at the service boundary before they influence any policy decision.
 
 ## 5. Proposed architecture
 
@@ -88,17 +90,30 @@ A future `suspected_fraud` category that routes to Fraud Operations and never dr
 
 Compliance safety is independent from category classification. The system performs an early safety assessment that can override a classifier result. If the safety detector identifies a compliance-sensitive signal, the effective category is forced to compliance and draft execution is not reachable.
 
+The Compliance no-draft rule does not depend on the safety flag or on policy configuration. An effective category of Compliance forbids drafting on its own, checked before the drafter is invoked, so a malformed or mis-edited policy registry that appears to set `Action=draft_resolution, DraftAllowed=true` for Compliance still yields no draft and never calls the drafter.
+
 A second egress guard validates invariants after action execution:
 
+- a decision whose effective category is Compliance must not contain `draft_response`, independently of the safety flag;
 - a compliance-sensitive decision must not contain `draft_response`;
 - a category with `DraftAllowed=false` must not contain a draft;
 - any member-facing draft must require human approval.
 
-This is intentionally redundant: a classifier mistake alone is insufficient to create an unsafe member answer.
+This is intentionally redundant: neither a classifier mistake, nor a cleared safety flag, nor a mutated policy row is on its own sufficient to create an unsafe member answer.
+
+### Classifier output as untrusted input
+
+Classification is treated as an external, untrusted signal rather than as a trusted internal value. Confidence must be finite and within `[0,1]`; `NaN`, positive and negative infinity, and out-of-range values escalate to a human *before* any threshold comparison, because an unchecked `NaN` silently fails a `confidence < threshold` test and would otherwise have produced a member-facing draft. Reason codes are accepted only from a closed, code-owned set bound to the classified category, so free-form model or provider text cannot enter a decision, a routing context, or an audit record. Invalid classifier output degrades to the human path under service-owned reason codes. Introducing a real provider therefore requires an explicit adapter that maps provider output onto this internal set, which is the intended place for that translation to be reviewed.
 
 ### Sensitive data
 
-Raw member text stays in the existing authorized case system. Logs, traces, audit records, and cross-team routing payloads use IDs, reason codes, policy versions, confidence, and sanitized summaries. Routing metadata is allowlisted rather than copied wholesale. Production model adapters would minimize/redact fields that are not needed for the model task and use approved no-training/no-retention provider settings; raw request bodies would never be captured in application or tracing telemetry.
+Raw member text stays in the existing authorized case system. Logs, traces, audit records, and cross-team routing payloads use IDs, reason codes, policy versions, confidence, and sanitized summaries.
+
+Detection and redaction share one implementation, so a pattern recognized by the safety detector is necessarily also redacted from routing output and vice versa. The shared boundary covers formatted SSNs, email addresses, card-like digit sequences, `acct_`/`account-` style tokens, values explicitly labeled as an account or routing number including space- and hyphen-separated groups, and long contiguous digit runs. The words "account" and "routing" carry no sensitivity by themselves, so ordinary member and agent wording remains routable. The same boundary inspects generated drafts before a draft is attached to a decision or written to an audit record, and inspects edited responses at the release gate.
+
+Routing metadata is allowlisted by key and additionally validated by value: `channel` against a closed set, `locale` against a locale shape, and `app_version` against a bounded semantic-version shape. Invalid or sensitive values are omitted rather than copied or echoed back, so metadata cannot become an uninspected side channel.
+
+This detection is deliberately deterministic and regex-based. It is bounded prototype protection over reviewed patterns at a demonstrated boundary, not production DLP or entity recognition; the production replacement is named in section 15. Production model adapters would minimize/redact fields that are not needed for the model task and use approved no-training/no-retention provider settings; raw request bodies would never be captured in application or tracing telemetry.
 
 ### Detection and recovery
 
@@ -139,6 +154,8 @@ The system fails closed toward humans.
 | Failure | Safe behavior |
 |---|---|
 | classifier unavailable | human escalation |
+| classifier confidence non-finite or outside `[0,1]` | human escalation before any threshold or policy use |
+| classifier reason code outside the closed internal set | human escalation under a service-owned reason code |
 | classifier below category threshold | human escalation |
 | KB unavailable | human escalation |
 | drafter unavailable | human escalation |
@@ -146,12 +163,21 @@ The system fails closed toward humans.
 | routing API unavailable | retain existing case/manual queue; retry safely in production |
 | audit store unavailable | do not progress automated action; retain manual path |
 | compliance uncertainty | compliance/human path, never draft |
+| policy registry malformed for Compliance | no draft; the effective category blocks drafting and final validation |
 
 Production adapters receive per-dependency deadlines, bounded retries only for safe/idempotent operations, and circuit breakers where appropriate. Stage-level structured telemetry records `decision_id`, `intake_id`, stage name, dependency, duration, outcome, and reason code—never raw member text or unrestricted metadata. A slow response is debugged from per-stage timings and dependency health (for example, retrieval vs. model vs. routing), with p50/p95/p99 latency and timeout/degraded-mode rates monitored by dependency. The durable queue isolates bursty intake acceptance from downstream latency.
 
 ## 10. Human approval and explainability
 
-Every member-facing Q&A draft is returned with `human_approval_required=true`, but the prototype does not treat that boolean as the security boundary. `ReleaseForMember` is an explicit final gate between an AI draft and the existing member-send workflow. It releases only a General Q&A `draft_resolution` with a matching human review in `approved` or `edited_and_approved` state. Pending/rejected reviews are blocked; a Compliance decision is blocked even if a caller supplies an approval. The release gate also requires the approver and review time to be durably written before returning a releasable payload. If audit persistence fails, release fails closed.
+Every member-facing Q&A draft is returned with `human_approval_required=true`, but the prototype does not treat that boolean as the security boundary. `ReleaseForMember` is an explicit final gate between an AI draft and the existing member-send workflow.
+
+The gate operates on a decision ID rather than on a caller-supplied `Decision`. Eligibility is read from authoritative audit state, so a caller cannot assert its own category, action, or approval status in order to be released. It releases only a General Q&A `draft_resolution` whose authoritative audit record is still pending, with a human review in `approved` or `edited_and_approved` state. Pending and rejected reviews are blocked; a Compliance decision is blocked even if a caller supplies an approval.
+
+Approval is bound to the specific text a human actually reviewed. The audit record stores the SHA-256 of the original generated draft and never the raw draft itself, keeping member-facing text out of the audit store while still making the approval verifiable. An "approved unchanged" release must supply the reviewed response, which is hashed and compared against that stored value; a mutated draft therefore cannot be released as unchanged. An edited response is re-inspected through the same shared safety boundary and fails closed on detector error, compliance-sensitive content, or detected sensitive data. A consequence of storing only the hash is deliberate: the raw draft is not recoverable from audit state, so the reviewing workflow must present the text it is approving.
+
+Approval is recorded as a single atomic compare-and-set out of `pending`, guarded by the expected original-draft hash. That one transition both prevents replay — a second approval of the same decision is refused as ineligible — and prevents a stale approval from landing after the state has moved. The approval timestamp is generated by the service; it is not accepted from the request. Approver identity and time must be durably written before a releasable payload is returned, so if audit persistence fails, release fails closed.
+
+Reviewer identity is a stated prototype assumption rather than an implemented control: `ReviewerID` is taken as already authenticated by the upstream care workflow, and this service performs no authentication or authorization. In production that assumption is discharged by the authenticated care console and enforced authorization on the release endpoint.
 
 The decision/audit record stores decision ID, intake ID, effective category, action, confidence, reason codes, safety flags, policy version, approval state, approver identity, and timestamps. It deliberately excludes raw member text. In production this sanitized metadata would land in a dedicated, access-controlled and encrypted relational audit table (or the organization's equivalent durable audit store), separate from the raw case system. For this exercise, retention is assumed to be 365 days and should be replaced by the real Legal/Compliance retention policy.
 
@@ -200,7 +226,8 @@ As evidence improves, the team moves from shadow mode to visible drafts and stag
 ## 15. With more time
 
 - contract/integration tests for real ticketing, profile, KB, and model adapters;
-- richer PII detection and field-level data classification;
+- richer PII detection and field-level data classification, replacing the current deterministic regex boundary with production DLP/entity recognition;
+- a provider adapter that maps real model output onto the closed internal reason-code set, plus offline evaluation of that mapping;
 - offline evaluation dataset and confidence calibration;
 - queue/idempotency implementation;
 - approval UI and integration with the existing member-send system (the release-domain gate is implemented in the prototype);
