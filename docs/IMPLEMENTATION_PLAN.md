@@ -25,15 +25,35 @@ Complete a bounded hardening pass that closes the two reproduced submission bloc
 5. Classifier confidence must be finite and within `[0,1]`. Classifier reason codes are selected from a closed internal set; malformed output degrades to the human path using code-owned reasons.
 6. Effective `CategoryCompliance` independently forbids a draft at execution and final validation. Lightweight generated/edited draft inspection is defense-in-depth, not a general content-filtering subsystem.
 
-## Test-first sequence
+## Test-first tasks
 
-1. Add release tests for mutated unchanged approval, replay, server time, and edited-response safety; run them RED.
-2. Implement authoritative hash-bound atomic approval; rerun focused release tests GREEN.
-3. Add routing tests for formatted PII and malicious allowlisted metadata; run RED.
-4. Implement the shared detector/redactor and per-field metadata validation; rerun focused privacy tests GREEN.
-5. Add malformed classifier confidence/reason and malformed Compliance policy tests; run RED.
-6. Add trust-boundary validation and category-level Compliance invariant; rerun focused tests GREEN.
-7. Run exact Go 1.23.2 tests, race tests, vet, formatting, build, and an independent read-only review.
+### Task 1: Authoritative approval and replay safety
+
+**Files:** `internal/triage/interfaces.go`, `internal/triage/types.go`, `internal/triage/release.go`, `internal/triage/fakes.go`, `internal/triage/release_test.go`, and constructor call sites as required.
+
+1. Add focused tests for a mutated unchanged approval, replay, server-generated time, authoritative Compliance state, and unsafe edited content.
+2. Run only the release tests and verify each new behavior fails for the expected missing boundary.
+3. Add authoritative audit lookup, original-draft SHA-256 binding, and atomic pending-state transition.
+4. Rerun release tests, then the complete suite.
+
+### Task 2: Shared PII boundary and safe metadata values
+
+**Files:** `internal/triage/redact.go`, `internal/triage/safety.go`, `internal/triage/service.go`, and `internal/triage/service_test.go`.
+
+1. Add table-driven route tests for formatted SSNs, emails, card/account values, explicit account/routing-number values, and malicious `channel`, `locale`, and `app_version` values.
+2. Run the focused privacy tests and verify the sentinels currently reach observable routing output.
+3. Implement one shared detector/redactor plus narrow validators for each allowlisted metadata field. Do not treat the words “account” or “routing” alone as sensitive.
+4. Inspect generated and edited drafts with the same lightweight boundary, then rerun focused and complete tests.
+
+### Task 3: Classifier validation, Compliance invariant, and submission evidence
+
+**Files:** `internal/triage/service.go`, `internal/triage/policies.go`, `internal/triage/service_test.go`, `README.md`, `RFC.md`, and `AI_LEVERAGE_LOG.md`.
+
+1. Add tests for `NaN`, both infinities, confidence outside `[0,1]`, arbitrary classifier reason data, and a deliberately malformed Compliance drafting policy.
+2. Run focused tests and verify invalid confidence can bypass the current threshold and malformed policy can draft.
+3. Add classifier normalization with code-owned reason codes and an effective-category Compliance no-draft invariant at execution and final validation.
+4. Update documentation with the implemented trust boundaries, authenticated-upstream reviewer assumption, accurate deferrals, and adversarial AI-review narrative while keeping the AI Leverage Log at two paragraphs.
+5. Run exact Go 1.23.2 tests, race tests, vet, formatting, build, and independent review.
 
 ## Deliberate deferrals
 
