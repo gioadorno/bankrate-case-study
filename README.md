@@ -1,7 +1,5 @@
 # Support Triage & Resolution Agent
 
-Focused Go prototype for the Forward Deployed Engineer take-home case study.
-
 The submission intentionally prioritizes the architecture around AI classification and drafting—not model sophistication. The existing support case system remains the source of truth and manual safety net; this service adds triage, category policy, structural safety gates, sanitized routing, auditability, and a modeled human approval/release boundary.
 
 ## Run
