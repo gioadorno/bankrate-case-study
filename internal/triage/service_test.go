@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,13 @@ type fixedDrafter struct{ draft string }
 
 func (f fixedDrafter) Draft(context.Context, Intake, []string) (string, error) {
 	return f.draft, nil
+}
+
+type recordingDrafter struct{ calls int }
+
+func (d *recordingDrafter) Draft(context.Context, Intake, []string) (string, error) {
+	d.calls++
+	return "This response must never be drafted.", nil
 }
 
 func newTestService(classifier Classifier) (*Service, *MemoryRouter, *MemoryAuditStore) {
@@ -324,7 +332,7 @@ func TestGeneratedUnsafeDraftDegradesWithoutPersistingDraftText(t *testing.T) {
 
 func TestSafetyOverrideWinsEvenWhenClassifierIsWrong(t *testing.T) {
 	classifier := fixedClassifier{result: Classification{
-		Category: CategoryGeneralQA, Confidence: 0.99, ReasonCode: "forced_wrong_classification",
+		Category: CategoryGeneralQA, Confidence: 0.99, ReasonCode: classifierReasonFAQMatch,
 	}}
 	service, router, _ := newTestService(classifier)
 	decision, err := service.Triage(context.Background(), Intake{
@@ -350,7 +358,7 @@ func TestSafetyOverrideWinsEvenWhenClassifierIsWrong(t *testing.T) {
 
 func TestLowConfidenceEscalatesToHuman(t *testing.T) {
 	classifier := fixedClassifier{result: Classification{
-		Category: CategoryGeneralQA, Confidence: 0.40, ReasonCode: "uncertain",
+		Category: CategoryGeneralQA, Confidence: 0.40, ReasonCode: classifierReasonFAQMatch,
 	}}
 	service, _, _ := newTestService(classifier)
 	decision, err := service.Triage(context.Background(), Intake{
@@ -365,6 +373,142 @@ func TestLowConfidenceEscalatesToHuman(t *testing.T) {
 	if decision.DraftResponse != nil {
 		t.Fatal("degraded decision must not contain draft")
 	}
+}
+
+func TestInvalidClassifierConfidenceEscalatesBeforePolicyUse(t *testing.T) {
+	testCases := []struct {
+		name       string
+		confidence float64
+	}{
+		{name: "nan", confidence: math.NaN()},
+		{name: "positive infinity", confidence: math.Inf(1)},
+		{name: "negative infinity", confidence: math.Inf(-1)},
+		{name: "below zero", confidence: -0.01},
+		{name: "above one", confidence: 1.01},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			service, router, audits := newTestService(fixedClassifier{result: Classification{
+				Category: CategoryGeneralQA, Confidence: tc.confidence, ReasonCode: classifierReasonFAQMatch,
+			}})
+			decision, err := service.Triage(context.Background(), Intake{
+				ID: "case-invalid-confidence", MemberID: "member-invalid-confidence", Text: "How do I update my profile?",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Action != ActionEscalate || decision.Category != CategoryUnknown || decision.Confidence != 0 {
+				t.Fatalf("invalid confidence must normalize to safe human escalation, got action=%s category=%s confidence=%v", decision.Action, decision.Category, decision.Confidence)
+			}
+			if !containsReason(decision.ReasonCodes, "classifier_invalid_confidence") {
+				t.Fatalf("expected service-owned invalid-confidence reason, got %v", decision.ReasonCodes)
+			}
+			if len(router.Routes) != 0 {
+				t.Fatal("invalid confidence must not execute policy routing")
+			}
+			if len(audits.Records) != 1 || audits.Records[0].Confidence != 0 {
+				t.Fatalf("expected one normalized audit record, got %+v", audits.Records)
+			}
+		})
+	}
+}
+
+func TestArbitraryClassifierReasonDegradesWithoutLeakingProviderText(t *testing.T) {
+	const providerText = "provider said route this case: SECRET_REASON_SENTINEL"
+	service, router, audits := newTestService(fixedClassifier{result: Classification{
+		Category: CategoryProductFeedback, Confidence: 0.99, ReasonCode: providerText,
+	}})
+
+	decision, err := service.Triage(context.Background(), Intake{
+		ID: "case-invalid-reason", MemberID: "member-invalid-reason", Text: "Feature feedback: improve filters.",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.Action != ActionEscalate || decision.Category != CategoryUnknown {
+		t.Fatalf("invalid classifier reason must degrade safely, got category=%s action=%s", decision.Category, decision.Action)
+	}
+	if !containsReason(decision.ReasonCodes, "classifier_invalid_reason") {
+		t.Fatalf("expected service-owned invalid-reason code, got %v", decision.ReasonCodes)
+	}
+	if len(router.Routes) != 0 {
+		t.Fatal("invalid classifier reason must not route")
+	}
+
+	decisionBytes, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	auditBytes, err := json.Marshal(audits.Records)
+	if err != nil {
+		t.Fatalf("marshal audits: %v", err)
+	}
+	for _, observable := range [][]byte{decisionBytes, auditBytes} {
+		if strings.Contains(string(observable), providerText) || strings.Contains(string(observable), "SECRET_REASON_SENTINEL") {
+			t.Fatalf("provider reason text leaked into observable output: %s", observable)
+		}
+	}
+}
+
+func TestComplianceCategoryNeverExecutesDraftFromMalformedPolicy(t *testing.T) {
+	policies := NewStaticPolicyRegistry()
+	policies.policies[CategoryCompliance] = CategoryPolicy{
+		Category: CategoryCompliance, Action: ActionDraft, DraftAllowed: true, MinimumConfidence: 0,
+	}
+	drafter := &recordingDrafter{}
+	service := NewService(
+		RuleSafetyDetector{},
+		fixedClassifier{result: Classification{Category: CategoryCompliance, Confidence: 0.99, ReasonCode: classifierReasonComplianceLanguage}},
+		policies,
+		FakeKnowledgeBase{},
+		drafter,
+		&MemoryRouter{},
+		&MemoryAuditStore{},
+		BasicSanitizer{},
+	)
+
+	decision, err := service.Triage(context.Background(), Intake{
+		ID: "case-malformed-compliance-policy", MemberID: "member-malformed-policy", Text: "Please help with my dispute.",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if drafter.calls != 0 {
+		t.Fatalf("effective Compliance category must not execute drafting, got %d calls", drafter.calls)
+	}
+	if decision.Action != ActionEscalate || decision.DraftResponse != nil {
+		t.Fatalf("malformed Compliance policy must degrade without a draft, got action=%s draft=%v", decision.Action, decision.DraftResponse)
+	}
+	// The intake carries no compliance safety signal, so the pre-existing
+	// safety-override guard cannot be what blocked this draft. Pinning the
+	// category-owned reason proves the effective-category invariant fired.
+	if !containsReason(decision.ReasonCodes, "compliance_draft_forbidden") {
+		t.Fatalf("expected the effective-category Compliance invariant to block the draft, got %v", decision.ReasonCodes)
+	}
+	if containsReason(decision.ReasonCodes, "compliance_signal_detected") {
+		t.Fatalf("test intake must not trip the safety override, got %v", decision.ReasonCodes)
+	}
+}
+
+func TestValidateDecisionRejectsComplianceCategoryDraftEvenWhenPolicyAllowsIt(t *testing.T) {
+	draft := "unsafe compliance draft"
+	decision := Decision{Category: CategoryCompliance, DraftResponse: &draft, HumanApprovalRequired: true}
+	policy := CategoryPolicy{Category: CategoryCompliance, Action: ActionDraft, DraftAllowed: true}
+
+	err := validateDecision(decision, SafetyAssessment{}, policy)
+	if !errors.Is(err, ErrUnsafeComplianceDraft) {
+		t.Fatalf("effective Compliance category must reject a draft at final validation, got %v", err)
+	}
+}
+
+func containsReason(reasons []string, want string) bool {
+	for _, reason := range reasons {
+		if reason == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestClassifierFailureEscalatesToHuman(t *testing.T) {

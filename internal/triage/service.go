@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -14,9 +15,15 @@ var (
 	ErrMissingIntakeID       = errors.New("missing intake id")
 	ErrMissingMemberID       = errors.New("missing member id")
 	ErrMissingText           = errors.New("missing intake text")
-	ErrUnsafeComplianceDraft = errors.New("compliance-sensitive intake produced a member draft")
+	ErrUnsafeComplianceDraft = errors.New("Compliance decision produced a member draft")
 	ErrDraftForbidden        = errors.New("draft forbidden by category policy")
 	ErrApprovalGateMissing   = errors.New("member-facing draft missing human approval gate")
+)
+
+const (
+	classifierReasonFAQMatch                = "faq_match"
+	classifierReasonProductFeedbackLanguage = "product_feedback_language"
+	classifierReasonComplianceLanguage      = "compliance_language"
 )
 
 type Service struct {
@@ -64,6 +71,12 @@ func (s *Service) Triage(ctx context.Context, intake Intake) (Decision, error) {
 	if err != nil {
 		return s.safeDegraded(ctx, decisionID, intake.ID, "classifier_unavailable")
 	}
+	if !validClassifierConfidence(classification.Confidence) {
+		return s.safeDegraded(ctx, decisionID, intake.ID, "classifier_invalid_confidence")
+	}
+	if !validClassifierReason(classification.Category, classification.ReasonCode) {
+		return s.safeDegraded(ctx, decisionID, intake.ID, "classifier_invalid_reason")
+	}
 
 	category := classification.Category
 	if safety.ComplianceSensitive {
@@ -96,6 +109,9 @@ func (s *Service) Triage(ctx context.Context, intake Intake) (Decision, error) {
 	// decision passes the egress guard and a sanitized pre-execution audit record exists.
 	switch policy.Action {
 	case ActionDraft:
+		if category == CategoryCompliance {
+			return s.safeDegradedWithClassification(ctx, decision, safety, "compliance_draft_forbidden")
+		}
 		if !policy.DraftAllowed || safety.ComplianceSensitive {
 			return s.safeDegradedWithClassification(ctx, decision, safety, "draft_not_permitted")
 		}
@@ -182,8 +198,25 @@ func validateIntake(in Intake) error {
 	return nil
 }
 
+func validClassifierConfidence(confidence float64) bool {
+	return !math.IsNaN(confidence) && !math.IsInf(confidence, 0) && confidence >= 0 && confidence <= 1
+}
+
+func validClassifierReason(category Category, reason string) bool {
+	switch category {
+	case CategoryGeneralQA:
+		return reason == classifierReasonFAQMatch
+	case CategoryProductFeedback:
+		return reason == classifierReasonProductFeedbackLanguage
+	case CategoryCompliance:
+		return reason == classifierReasonComplianceLanguage
+	default:
+		return false
+	}
+}
+
 func validateDecision(decision Decision, safety SafetyAssessment, policy CategoryPolicy) error {
-	if safety.ComplianceSensitive && decision.DraftResponse != nil {
+	if (decision.Category == CategoryCompliance || safety.ComplianceSensitive) && decision.DraftResponse != nil {
 		return ErrUnsafeComplianceDraft
 	}
 	if !policy.DraftAllowed && decision.DraftResponse != nil {

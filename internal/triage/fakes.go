@@ -14,14 +14,14 @@ func (RuleClassifier) Classify(_ context.Context, intake Intake) (Classification
 	lower := strings.ToLower(intake.Text)
 
 	if strings.Contains(lower, "feedback") || strings.Contains(lower, "feature") || strings.Contains(lower, "wish") || strings.Contains(lower, "improve") {
-		return Classification{Category: CategoryProductFeedback, Confidence: 0.90, ReasonCode: "product_feedback_language"}, nil
+		return Classification{Category: CategoryProductFeedback, Confidence: 0.90, ReasonCode: classifierReasonProductFeedbackLanguage}, nil
 	}
 
 	if strings.Contains(lower, "law") || strings.Contains(lower, "illegal") || strings.Contains(lower, "regulator") || strings.Contains(lower, "violation") {
-		return Classification{Category: CategoryCompliance, Confidence: 0.82, ReasonCode: "compliance_language"}, nil
+		return Classification{Category: CategoryCompliance, Confidence: 0.82, ReasonCode: classifierReasonComplianceLanguage}, nil
 	}
 
-	return Classification{Category: CategoryGeneralQA, Confidence: 0.92, ReasonCode: "faq_match"}, nil
+	return Classification{Category: CategoryGeneralQA, Confidence: 0.92, ReasonCode: classifierReasonFAQMatch}, nil
 }
 
 type FakeKnowledgeBase struct {
